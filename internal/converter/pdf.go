@@ -9,8 +9,9 @@ import (
 	"sort"
 )
 
-// PDFToBase64Images converts a PDF file to a slice of base64-encoded PNG images,
-// one per page. Requires pdftoppm (poppler-utils) to be installed.
+// PDFToBase64Images converts a PDF file to a slice of base64-encoded JPEG images,
+// one per page. Uses grayscale, JPEG quality 80, and scales to max 1568px.
+// Requires pdftoppm (poppler-utils) to be installed.
 // Images are also saved to debugDir for inspection.
 func PDFToBase64Images(pdfPath, debugDir string) ([]string, error) {
 	tmpDir, err := os.MkdirTemp("", "pdf-convert-*")
@@ -20,12 +21,17 @@ func PDFToBase64Images(pdfPath, debugDir string) ([]string, error) {
 	defer os.RemoveAll(tmpDir)
 
 	outputPrefix := filepath.Join(tmpDir, "page")
-	cmd := exec.Command("pdftoppm", "-png", "-r", "200", pdfPath, outputPrefix)
+	cmd := exec.Command("pdftoppm",
+		"-jpeg", "-jpegopt", "quality=80",
+		"-gray",
+		"-scale-to", "1024",
+		pdfPath, outputPrefix,
+	)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("running pdftoppm: %w: %s", err, string(output))
 	}
 
-	matches, err := filepath.Glob(outputPrefix + "-*.png")
+	matches, err := filepath.Glob(outputPrefix + "-*.jpg")
 	if err != nil {
 		return nil, fmt.Errorf("globbing output files: %w", err)
 	}

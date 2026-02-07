@@ -131,16 +131,172 @@ func (c *Client) EnsureCustomField(ctx context.Context, name, dataType string) (
 	return c.CreateCustomField(ctx, name, dataType)
 }
 
-// UpdateDocumentCustomField sets a custom field value on a document.
-func (c *Client) UpdateDocumentCustomField(ctx context.Context, documentID, fieldID, value int) error {
-	type cfValue struct {
-		Field int `json:"field"`
-		Value int `json:"value"`
+type DocumentType struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+type documentTypeListResponse struct {
+	Count   int            `json:"count"`
+	Next    *string        `json:"next"`
+	Results []DocumentType `json:"results"`
+}
+
+// ListDocumentTypes fetches all document types from Paperless-ngx.
+func (c *Client) ListDocumentTypes(ctx context.Context) ([]DocumentType, error) {
+	var all []DocumentType
+	reqURL := c.BaseURL + "/api/document_types/?fields=id,name"
+
+	for reqURL != "" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("creating request: %w", err)
+		}
+		req.Header.Set("Authorization", "Token "+c.Token)
+
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("fetching document types: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("paperless returned status %d: %s", resp.StatusCode, string(body))
+		}
+
+		var page documentTypeListResponse
+		if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("decoding response: %w", err)
+		}
+		resp.Body.Close()
+
+		all = append(all, page.Results...)
+
+		if page.Next != nil {
+			reqURL = *page.Next
+		} else {
+			reqURL = ""
+		}
 	}
-	payload := map[string][]cfValue{
-		"custom_fields": {{Field: fieldID, Value: value}},
+
+	return all, nil
+}
+
+type Correspondent struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+type correspondentListResponse struct {
+	Count   int             `json:"count"`
+	Next    *string         `json:"next"`
+	Results []Correspondent `json:"results"`
+}
+
+// ListCorrespondents fetches all correspondents from Paperless-ngx.
+func (c *Client) ListCorrespondents(ctx context.Context) ([]Correspondent, error) {
+	var all []Correspondent
+	reqURL := c.BaseURL + "/api/correspondents/?fields=id,name"
+
+	for reqURL != "" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("creating request: %w", err)
+		}
+		req.Header.Set("Authorization", "Token "+c.Token)
+
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("fetching correspondents: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("paperless returned status %d: %s", resp.StatusCode, string(body))
+		}
+
+		var page correspondentListResponse
+		if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("decoding response: %w", err)
+		}
+		resp.Body.Close()
+
+		all = append(all, page.Results...)
+
+		if page.Next != nil {
+			reqURL = *page.Next
+		} else {
+			reqURL = ""
+		}
 	}
-	body, _ := json.Marshal(payload)
+
+	return all, nil
+}
+
+// CreateCorrespondent creates a new correspondent in Paperless-ngx.
+func (c *Client) CreateCorrespondent(ctx context.Context, name string) (Correspondent, error) {
+	body, _ := json.Marshal(map[string]string{"name": name})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/correspondents/", bytes.NewReader(body))
+	if err != nil {
+		return Correspondent{}, fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Authorization", "Token "+c.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return Correspondent{}, fmt.Errorf("creating correspondent: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		return Correspondent{}, fmt.Errorf("paperless returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var corr Correspondent
+	if err := json.NewDecoder(resp.Body).Decode(&corr); err != nil {
+		return Correspondent{}, fmt.Errorf("decoding response: %w", err)
+	}
+	return corr, nil
+}
+
+// EnsureCorrespondent returns the correspondent with the given name, creating it if it doesn't exist.
+func (c *Client) EnsureCorrespondent(ctx context.Context, name string, existing map[string]int) (int, error) {
+	if id, ok := existing[name]; ok {
+		return id, nil
+	}
+	corr, err := c.CreateCorrespondent(ctx, name)
+	if err != nil {
+		return 0, err
+	}
+	existing[name] = corr.ID
+	return corr.ID, nil
+}
+
+// CustomFieldValue represents a custom field value to set on a document.
+type CustomFieldValue struct {
+	Field int         `json:"field"`
+	Value interface{} `json:"value"`
+}
+
+// DocumentUpdate holds the fields to update on a document via PATCH.
+type DocumentUpdate struct {
+	Title         *string            `json:"title,omitempty"`
+	Content       *string            `json:"content,omitempty"`
+	DocumentType  *int               `json:"document_type,omitempty"`
+	Correspondent *int               `json:"correspondent,omitempty"`
+	Created       *string            `json:"created,omitempty"`
+	CustomFields  []CustomFieldValue `json:"custom_fields,omitempty"`
+}
+
+// UpdateDocument patches a document with the provided fields.
+func (c *Client) UpdateDocument(ctx context.Context, documentID int, update DocumentUpdate) error {
+	body, _ := json.Marshal(update)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, fmt.Sprintf("%s/api/documents/%d/", c.BaseURL, documentID), bytes.NewReader(body))
 	if err != nil {
@@ -186,12 +342,12 @@ func (c *Client) DownloadDocument(ctx context.Context, documentID int) ([]byte, 
 	return io.ReadAll(resp.Body)
 }
 
-// ListUnprocessedDocuments fetches documents where the custom field is null or less than processID.
-// Makes two queries and deduplicates by document ID.
-func (c *Client) ListUnprocessedDocuments(ctx context.Context, fieldName string, processID int) ([]Document, error) {
-	// Query 1: field is null (not set on the document)
-	nullQuery, _ := json.Marshal([]interface{}{fieldName, "isnull", true})
-	nullDocs, err := c.listDocuments(ctx, fmt.Sprintf("&custom_field_query=%s", url.QueryEscape(string(nullQuery))))
+// ListUnprocessedDocuments fetches documents where the custom field is null or less than processID,
+// excluding any documents where skipFieldName is set to true.
+func (c *Client) ListUnprocessedDocuments(ctx context.Context, fieldName string, processID int, skipFieldName string) ([]Document, error) {
+	// Query 1: field does not exist on the document
+	existsQuery, _ := json.Marshal([]interface{}{fieldName, "exists", false})
+	nullDocs, err := c.listDocuments(ctx, fmt.Sprintf("&custom_field_query=%s", url.QueryEscape(string(existsQuery))))
 	if err != nil {
 		return nil, fmt.Errorf("querying null documents: %w", err)
 	}
@@ -203,11 +359,24 @@ func (c *Client) ListUnprocessedDocuments(ctx context.Context, fieldName string,
 		return nil, fmt.Errorf("querying lt documents: %w", err)
 	}
 
-	// Deduplicate
+	// Find documents to skip (llm-skip == true)
+	skipIDs := make(map[int]bool)
+	if skipFieldName != "" {
+		skipQuery, _ := json.Marshal([]interface{}{skipFieldName, "exact", true})
+		skipDocs, err := c.listDocuments(ctx, fmt.Sprintf("&custom_field_query=%s", url.QueryEscape(string(skipQuery))))
+		if err != nil {
+			return nil, fmt.Errorf("querying skip documents: %w", err)
+		}
+		for _, doc := range skipDocs {
+			skipIDs[doc.ID] = true
+		}
+	}
+
+	// Deduplicate and exclude skipped
 	seen := make(map[int]bool)
 	var result []Document
 	for _, doc := range append(nullDocs, ltDocs...) {
-		if !seen[doc.ID] {
+		if !seen[doc.ID] && !skipIDs[doc.ID] {
 			seen[doc.ID] = true
 			result = append(result, doc)
 		}

@@ -14,7 +14,7 @@ import (
 
 func main() {
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama API base URL")
-	model := flag.String("model", "qwen3-vl:8b", "Ollama model to use for analysis")
+	model := flag.String("model", "glm-ocr:latest", "Ollama model to use for analysis")
 	port := flag.Int("port", 8080, "HTTP server port")
 	flag.Parse()
 

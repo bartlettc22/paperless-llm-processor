@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -16,31 +17,45 @@ type Client struct {
 	HTTP    *http.Client
 }
 
-type generateRequest struct {
-	Model   string          `json:"model"`
-	Prompt  string          `json:"prompt"`
-	Images  []string        `json:"images"`
-	Stream  bool            `json:"stream"`
-	Format  json.RawMessage `json:"format,omitempty"`
-	Options *modelOptions   `json:"options,omitempty"`
+type chatRequest struct {
+	Model    string          `json:"model"`
+	Messages []chatMessage   `json:"messages"`
+	Stream   bool            `json:"stream"`
+	Think    bool            `json:"think"`
+	Format   json.RawMessage `json:"format,omitempty"`
+	Options  *modelOptions   `json:"options,omitempty"`
+}
+
+type chatMessage struct {
+	Role    string   `json:"role"`
+	Content string   `json:"content"`
+	Images  []string `json:"images,omitempty"`
 }
 
 type modelOptions struct {
-	Temperature float64 `json:"temperature"`
+	Temperature   float64 `json:"temperature"`
+	RepeatPenalty float64 `json:"repeat_penalty,omitempty"`
+	NumPredict    int     `json:"num_predict,omitempty"`
+	NumCtx        int     `json:"num_ctx,omitempty"`
 }
 
 type DocumentAnalysis struct {
-	Transcription string `json:"transcription"`
-	FileName      string `json:"file_name"`
-	DocumentType  string `json:"document_type"`
-	DocumentDate  string `json:"document_date"`
+	Summary        string   `json:"summary"`
+	FileName       string   `json:"file_name"`
+	DocumentType   string   `json:"document_type"`
+	DocumentDate   string   `json:"document_date"`
+	Correspondents []string `json:"correspondents"`
 }
 
-type generateResponse struct {
-	Response string `json:"response"`
-	Thinking string `json:"thinking,omitempty"`
-	Done     bool   `json:"done"`
-	Error    string `json:"error,omitempty"`
+type chatResponse struct {
+	Message chatResponseMessage `json:"message"`
+	Done    bool                `json:"done"`
+	Error   string              `json:"error,omitempty"`
+}
+
+type chatResponseMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
 func NewClient(baseURL, model string) *Client {
@@ -51,12 +66,13 @@ func NewClient(baseURL, model string) *Client {
 	}
 }
 
-// Analyze sends a base64-encoded image to the Ollama vision model with the given prompt.
+// Analyze sends base64-encoded images to the Ollama vision model with the given prompt.
 func (c *Client) Analyze(prompt string, imagesBase64 []string) (string, error) {
-	reqBody := generateRequest{
-		Model:  c.Model,
-		Prompt: prompt,
-		Images: imagesBase64,
+	reqBody := chatRequest{
+		Model: c.Model,
+		Messages: []chatMessage{
+			{Role: "user", Content: prompt, Images: imagesBase64},
+		},
 		Stream: false,
 	}
 
@@ -65,7 +81,7 @@ func (c *Client) Analyze(prompt string, imagesBase64 []string) (string, error) {
 		return "", fmt.Errorf("marshaling request: %w", err)
 	}
 
-	resp, err := c.HTTP.Post(c.BaseURL+"/api/generate", "application/json", bytes.NewReader(body))
+	resp, err := c.HTTP.Post(c.BaseURL+"/api/chat", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("calling ollama API: %w", err)
 	}
@@ -76,54 +92,72 @@ func (c *Client) Analyze(prompt string, imagesBase64 []string) (string, error) {
 		return "", fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	var result generateResponse
+	var result chatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("decoding response: %w", err)
 	}
 
-	return result.Response, nil
+	return result.Message.Content, nil
 }
 
-var documentAnalysisSchema = json.RawMessage(`{
-	"type": "object",
-	"properties": {
-		"transcription": {
-			"type": "string",
-			"description": "Full text transcription of the document"
+func buildSchema(documentTypes []string) json.RawMessage {
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"file_name": map[string]interface{}{
+				"type":        "string",
+				"description": "Suggested file name for the document",
+			},
+			"document_type": map[string]interface{}{
+				"type":        "string",
+				"enum":        documentTypes,
+				"description": "The type of document",
+			},
+			"document_date": map[string]interface{}{
+				"type":        "string",
+				"description": "The date of the document in YYYY-MM-DD format, or empty string if not confidently determined",
+			},
+			"summary": map[string]interface{}{
+				"type":        "string",
+				"description": "A concise summary of the document including what it is, relevant dates, people, transactions, entities, accounts, and key details.",
+			},
+			"correspondents": map[string]interface{}{
+				"type":        "array",
+				"description": "A list of entities (people, businesses, organizations, government agencies, etc.) that this document pertains to.",
+				"items": map[string]interface{}{
+					"type": "string",
+				},
+			},
 		},
-		"file_name": {
-			"type": "string",
-			"description": "Suggested file name for the document"
-		},
-		"document_type": {
-			"type": "string",
-			"enum": ["Invoice", "Receipt", "Letter", "Contract", "Tax Document", "Medical", "Insurance", "Bank Statement", "Other"],
-			"description": "The type of document"
-		},
-		"document_date": {
-			"type": "string",
-			"description": "The date of the document in YYYY-MM-DD format, or empty string if not confidently determined"
-		}
-	},
-	"required": ["transcription", "file_name", "document_type", "document_date"]
-}`)
+		"required": []string{"summary", "file_name", "document_type", "document_date", "correspondents"},
+	}
+	data, _ := json.Marshal(schema)
+	return data
+}
 
-const structuredPrompt = `Analyze this document image and provide:
-1. A complete transcription of all text in the document.
+func buildPrompt(documentTypes []string) string {
+	typeList := strings.Join(documentTypes, ", ")
+	return fmt.Sprintf(`You are looking at a single page of a document. Analyze this page image and provide:
+1. A concise summary of this page's content: what it is, relevant dates, people, transactions, entities, accounts, and any other key details.
 2. A suggested file name (descriptive, using underscores, with no extension).
-3. The document type, which must be one of: Invoice, Receipt, Letter, Contract, Tax Document, Medical, Insurance, Bank Statement, Other.
+3. The document type, which must be one of: %s.
 4. The document date in YYYY-MM-DD format. Only provide a date if you are confident it is the primary date of the document (e.g. invoice date, letter date, transaction date). Use an empty string if uncertain.
+5. A list of correspondents: the people, businesses, organizations, government agencies, or other entities that this document pertains to. Use proper names and title case.
 
-Respond with JSON containing "transcription", "file_name", "document_type", and "document_date" fields.`
+Respond with JSON containing "summary", "file_name", "document_type", "document_date", and "correspondents" fields.  The response MUST be valid JSON.`, typeList)
+}
 
-// AnalyzeStructured sends images to the Ollama vision model and returns structured analysis.
-func (c *Client) AnalyzeStructured(imagesBase64 []string) (*DocumentAnalysis, error) {
-	reqBody := generateRequest{
-		Model:   c.Model,
-		Prompt:  structuredPrompt,
-		Images:  imagesBase64,
+// AnalyzeStructured sends a single page image to the Ollama vision model and returns structured analysis.
+// documentTypes is the list of valid document type names from Paperless-ngx.
+func (c *Client) AnalyzeStructured(imageBase64 string, documentTypes []string) (*DocumentAnalysis, error) {
+	reqBody := chatRequest{
+		Model: c.Model,
+		Messages: []chatMessage{
+			{Role: "user", Content: buildPrompt(documentTypes), Images: []string{imageBase64}},
+		},
 		Stream:  false,
-		Format:  documentAnalysisSchema,
+		Think:   false,
+		Format:  buildSchema(documentTypes),
 		Options: &modelOptions{Temperature: 0},
 	}
 
@@ -132,9 +166,9 @@ func (c *Client) AnalyzeStructured(imagesBase64 []string) (*DocumentAnalysis, er
 		return nil, fmt.Errorf("marshaling request: %w", err)
 	}
 
-	log.Printf("  Sending request to Ollama (%d images, model=%s)...", len(imagesBase64), c.Model)
+	log.Printf("  Sending request to Ollama (model=%s)...", c.Model)
 
-	resp, err := c.HTTP.Post(c.BaseURL+"/api/generate", "application/json", bytes.NewReader(body))
+	resp, err := c.HTTP.Post(c.BaseURL+"/api/chat", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("calling ollama API: %w", err)
 	}
@@ -149,7 +183,7 @@ func (c *Client) AnalyzeStructured(imagesBase64 []string) (*DocumentAnalysis, er
 		return nil, fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	var result generateResponse
+	var result chatResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("decoding response: %w: body=%s", err, string(respBody))
 	}
@@ -158,22 +192,26 @@ func (c *Client) AnalyzeStructured(imagesBase64 []string) (*DocumentAnalysis, er
 		return nil, fmt.Errorf("ollama error: %s", result.Error)
 	}
 
-	log.Printf("  Ollama response received (len=%d)", len(result.Response))
+	content := result.Message.Content
+	log.Printf("  Ollama response: done=%v, content_len=%d", result.Done, len(content))
 
-	// Some models (e.g. qwen3-vl) put structured output in the thinking field
-	responseText := result.Response
-	if responseText == "" {
-		responseText = result.Thinking
-	}
-
-	if responseText == "" {
+	if content == "" {
 		return nil, fmt.Errorf("ollama returned empty response: full_body=%s", string(respBody))
 	}
 
+	log.Printf("  Response (last_100=%s)", truncateTail(content, 100))
+
 	var analysis DocumentAnalysis
-	if err := json.Unmarshal([]byte(responseText), &analysis); err != nil {
-		return nil, fmt.Errorf("parsing structured response: %w: raw=%s", err, responseText)
+	if err := json.Unmarshal([]byte(content), &analysis); err != nil {
+		return nil, fmt.Errorf("parsing response: %w: len=%d, done=%v, last_200=%s", err, len(content), result.Done, truncateTail(content, 200))
 	}
 
 	return &analysis, nil
+}
+
+func truncateTail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return "..." + s[len(s)-n:]
 }
