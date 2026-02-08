@@ -24,7 +24,7 @@ func PDFToBase64Images(pdfPath, debugDir string) ([]string, error) {
 	cmd := exec.Command("pdftoppm",
 		"-jpeg", "-jpegopt", "quality=80",
 		"-gray",
-		"-scale-to", "1024",
+		"-scale-to", "768",
 		pdfPath, outputPrefix,
 	)
 	if output, err := cmd.CombinedOutput(); err != nil {

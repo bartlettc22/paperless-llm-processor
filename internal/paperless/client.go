@@ -278,6 +278,100 @@ func (c *Client) EnsureCorrespondent(ctx context.Context, name string, existing 
 	return corr.ID, nil
 }
 
+type Tag struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+type tagListResponse struct {
+	Count   int     `json:"count"`
+	Next    *string `json:"next"`
+	Results []Tag   `json:"results"`
+}
+
+// ListTags fetches all tags from Paperless-ngx.
+func (c *Client) ListTags(ctx context.Context) ([]Tag, error) {
+	var all []Tag
+	reqURL := c.BaseURL + "/api/tags/?fields=id,name"
+
+	for reqURL != "" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("creating request: %w", err)
+		}
+		req.Header.Set("Authorization", "Token "+c.Token)
+
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("fetching tags: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("paperless returned status %d: %s", resp.StatusCode, string(body))
+		}
+
+		var page tagListResponse
+		if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("decoding response: %w", err)
+		}
+		resp.Body.Close()
+
+		all = append(all, page.Results...)
+
+		if page.Next != nil {
+			reqURL = *page.Next
+		} else {
+			reqURL = ""
+		}
+	}
+
+	return all, nil
+}
+
+// CreateTag creates a new tag in Paperless-ngx.
+func (c *Client) CreateTag(ctx context.Context, name string) (Tag, error) {
+	body, _ := json.Marshal(map[string]string{"name": name})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/tags/", bytes.NewReader(body))
+	if err != nil {
+		return Tag{}, fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Authorization", "Token "+c.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return Tag{}, fmt.Errorf("creating tag: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		return Tag{}, fmt.Errorf("paperless returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var tag Tag
+	if err := json.NewDecoder(resp.Body).Decode(&tag); err != nil {
+		return Tag{}, fmt.Errorf("decoding response: %w", err)
+	}
+	return tag, nil
+}
+
+// EnsureTag returns the tag ID for the given name, creating it if it doesn't exist.
+func (c *Client) EnsureTag(ctx context.Context, name string, existing map[string]int) (int, error) {
+	if id, ok := existing[name]; ok {
+		return id, nil
+	}
+	tag, err := c.CreateTag(ctx, name)
+	if err != nil {
+		return 0, err
+	}
+	existing[name] = tag.ID
+	return tag.ID, nil
+}
+
 // CustomFieldValue represents a custom field value to set on a document.
 type CustomFieldValue struct {
 	Field int         `json:"field"`
@@ -290,6 +384,7 @@ type DocumentUpdate struct {
 	Content       *string            `json:"content,omitempty"`
 	DocumentType  *int               `json:"document_type,omitempty"`
 	Correspondent *int               `json:"correspondent,omitempty"`
+	Tags          []int              `json:"tags,omitempty"`
 	Created       *string            `json:"created,omitempty"`
 	CustomFields  []CustomFieldValue `json:"custom_fields,omitempty"`
 }

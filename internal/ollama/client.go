@@ -40,11 +40,13 @@ type modelOptions struct {
 }
 
 type DocumentAnalysis struct {
-	Summary        string   `json:"summary"`
-	FileName       string   `json:"file_name"`
-	DocumentType   string   `json:"document_type"`
-	DocumentDate   string   `json:"document_date"`
-	Correspondents []string `json:"correspondents"`
+	Summary       string   `json:"summary"`
+	Transcription string   `json:"transcription"`
+	FileName      string   `json:"file_name"`
+	DocumentType  string   `json:"document_type"`
+	DocumentDate  string   `json:"document_date"`
+	Correspondent string   `json:"correspondent"`
+	Tags          []string `json:"tags"`
 }
 
 type chatResponse struct {
@@ -121,15 +123,23 @@ func buildSchema(documentTypes []string) json.RawMessage {
 				"type":        "string",
 				"description": "A concise summary of the document including what it is, relevant dates, people, transactions, entities, accounts, and key details.",
 			},
-			"correspondents": map[string]interface{}{
+			"transcription": map[string]interface{}{
+				"type":        "string",
+				"description": "A full transcription of all visible text on this page, preserving the original wording and layout as much as possible.",
+			},
+			"correspondent": map[string]interface{}{
+				"type":        "string",
+				"description": "The primary correspondent: the person, business, organization, or entity that sent or is the main subject of this document. Use proper name and title case. Empty string if none.",
+			},
+			"tags": map[string]interface{}{
 				"type":        "array",
-				"description": "A list of entities (people, businesses, organizations, government agencies, etc.) that this document pertains to.",
+				"description": "ONLY proper names of specific people, companies, or organizations (e.g. 'John Smith', 'Acme Corp', 'IRS'). NEVER include generic terms, descriptions, diagnoses, topics, or categories. If no proper names apply, return an empty array.",
 				"items": map[string]interface{}{
 					"type": "string",
 				},
 			},
 		},
-		"required": []string{"summary", "file_name", "document_type", "document_date", "correspondents"},
+		"required": []string{"summary", "transcription", "file_name", "document_type", "document_date", "correspondent", "tags"},
 	}
 	data, _ := json.Marshal(schema)
 	return data
@@ -139,12 +149,14 @@ func buildPrompt(documentTypes []string) string {
 	typeList := strings.Join(documentTypes, ", ")
 	return fmt.Sprintf(`You are looking at a single page of a document. Analyze this page image and provide:
 1. A concise summary of this page's content: what it is, relevant dates, people, transactions, entities, accounts, and any other key details.
-2. A suggested file name (descriptive, using underscores, with no extension).
-3. The document type, which must be one of: %s.
-4. The document date in YYYY-MM-DD format. Only provide a date if you are confident it is the primary date of the document (e.g. invoice date, letter date, transaction date). Use an empty string if uncertain.
-5. A list of correspondents: the people, businesses, organizations, government agencies, or other entities that this document pertains to. Use proper names and title case.
+2. A full transcription of all visible text on this page, preserving the original wording and layout as much as possible.
+3. A suggested file name (descriptive, using underscores, with no extension).
+4. The document type, which must be one of: %s.
+5. The document date in YYYY-MM-DD format. Only provide a date if you are confident it is the primary date of the document (e.g. invoice date, letter date, transaction date). Use an empty string if uncertain.
+6. The correspondent: the primary person, business, organization, or entity that sent or is the main subject of this document. Use proper name and title case. Use an empty string if none.
+7. Tags: ONLY proper names of specific people, companies, or organizations mentioned in the document (e.g. "John Smith", "Acme Corp", "IRS"). NEVER include generic terms, descriptions, diagnoses, topics, or categories (e.g. do NOT include things like "Left lower quadrant pain", "Invoice", "Medical Records"). If no proper names apply, return an empty array.
 
-Respond with JSON containing "summary", "file_name", "document_type", "document_date", and "correspondents" fields.  The response MUST be valid JSON.`, typeList)
+Respond with JSON containing "summary", "transcription", "file_name", "document_type", "document_date", "correspondent", and "tags" fields.  The response MUST be valid JSON.`, typeList)
 }
 
 // AnalyzeStructured sends a single page image to the Ollama vision model and returns structured analysis.

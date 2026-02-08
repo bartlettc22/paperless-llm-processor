@@ -26,8 +26,11 @@ func main() {
 	if ollamaModel == "" {
 		// ollamaModel = "glm-ocr:latest"
 		// ollamaModel = "glm-ocr:q8_0"
-		ollamaModel = "qwen3-vl:8b"
-
+		// ollamaModel = "qwen3-vl:8b"
+		// ollamaModel = "qwen3-vl:4b"
+		// ollamaModel = "qwen3-vl:4b-instruct-q4_K_M"
+		ollamaModel = "qwen3-vl:4b-instruct"
+		// ollamaModel = "qwen3-vl:8b-instruct"
 	}
 
 	if paperlessURL == "" || paperlessToken == "" {
@@ -35,15 +38,17 @@ func main() {
 	}
 
 	// UPDATE_FIELDS controls which document fields to update (comma-separated).
-	// Valid values: title, document_type, document_date, summary, correspondents
+	// Valid values: title, document_type, document_date, summary, content, correspondent, tags
 	// If empty or unset, all fields are updated.
 	updateFieldsEnv := os.Getenv("UPDATE_FIELDS")
 	updateFields := map[string]bool{
-		"title":          true,
-		"document_type":  true,
-		"document_date":  true,
-		"summary":        true,
-		"correspondents": true,
+		"title":         true,
+		"document_type": true,
+		"document_date": true,
+		"summary":       true,
+		"content":       true,
+		"correspondent": true,
+		"tags":          true,
 	}
 	if updateFieldsEnv != "" {
 		updateFields = make(map[string]bool)
@@ -56,7 +61,7 @@ func main() {
 		log.Printf("UPDATE_FIELDS: only updating %v", updateFieldsEnv)
 	}
 
-	const processID = 4
+	const processID = 5
 	const fieldName = "llm-process-id"
 
 	pClient := paperless.NewClient(paperlessURL, paperlessToken)
@@ -75,6 +80,13 @@ func main() {
 		log.Fatalf("Failed to ensure custom field '%s': %v", summaryFieldName, err)
 	}
 	log.Printf("Using custom field '%s' (id=%d)", summaryFieldName, summaryCF.ID)
+
+	const modelFieldName = "llm-model"
+	modelCF, err := pClient.EnsureCustomField(ctx, modelFieldName, "string")
+	if err != nil {
+		log.Fatalf("Failed to ensure custom field '%s': %v", modelFieldName, err)
+	}
+	log.Printf("Using custom field '%s' (id=%d)", modelFieldName, modelCF.ID)
 
 	const skipFieldName = "llm-skip"
 	_, err = pClient.EnsureCustomField(ctx, skipFieldName, "boolean")
@@ -106,6 +118,17 @@ func main() {
 	}
 	log.Printf("Loaded %d correspondents", len(corrList))
 
+	// Load existing tags for lookup/creation
+	tagList, err := pClient.ListTags(ctx)
+	if err != nil {
+		log.Fatalf("Failed to list tags: %v", err)
+	}
+	tagIDByName := make(map[string]int, len(tagList))
+	for _, t := range tagList {
+		tagIDByName[t.Name] = t.ID
+	}
+	log.Printf("Loaded %d tags", len(tagList))
+
 	docs, err := pClient.ListUnprocessedDocuments(ctx, fieldName, processID, skipFieldName)
 	if err != nil {
 		log.Fatalf("Failed to list unprocessed documents: %v", err)
@@ -132,7 +155,8 @@ func main() {
 
 		var merged ollama.DocumentAnalysis
 		var summaries []string
-		seenCorrespondents := make(map[string]bool)
+		var transcriptions []string
+		seenTags := make(map[string]bool)
 		analyzeErr := false
 
 		for i, img := range images {
@@ -147,6 +171,9 @@ func main() {
 			if pageResult.Summary != "" {
 				summaries = append(summaries, pageResult.Summary)
 			}
+			if pageResult.Transcription != "" {
+				transcriptions = append(transcriptions, pageResult.Transcription)
+			}
 
 			// Use metadata from first page that provides it
 			if merged.FileName == "" && pageResult.FileName != "" {
@@ -158,12 +185,15 @@ func main() {
 			if merged.DocumentDate == "" && pageResult.DocumentDate != "" {
 				merged.DocumentDate = pageResult.DocumentDate
 			}
+			if merged.Correspondent == "" && pageResult.Correspondent != "" {
+				merged.Correspondent = pageResult.Correspondent
+			}
 
-			// Merge correspondents across pages (deduplicated)
-			for _, c := range pageResult.Correspondents {
-				if c != "" && !seenCorrespondents[c] {
-					seenCorrespondents[c] = true
-					merged.Correspondents = append(merged.Correspondents, c)
+			// Merge tags across pages (deduplicated)
+			for _, t := range pageResult.Tags {
+				if t != "" && !seenTags[t] {
+					seenTags[t] = true
+					merged.Tags = append(merged.Tags, t)
 				}
 			}
 
@@ -174,6 +204,7 @@ func main() {
 		}
 
 		merged.Summary = strings.Join(summaries, "\n\n")
+		merged.Transcription = strings.Join(transcriptions, "\n\n")
 
 		result := map[string]interface{}{
 			"document_id":    doc.ID,
@@ -188,6 +219,7 @@ func main() {
 		update := paperless.DocumentUpdate{
 			CustomFields: []paperless.CustomFieldValue{
 				{Field: cf.ID, Value: processID},
+				{Field: modelCF.ID, Value: ollamaModel},
 			},
 		}
 
@@ -197,6 +229,10 @@ func main() {
 
 		if updateFields["summary"] {
 			update.CustomFields = append(update.CustomFields, paperless.CustomFieldValue{Field: summaryCF.ID, Value: merged.Summary})
+		}
+
+		if updateFields["content"] && merged.Transcription != "" {
+			update.Content = &merged.Transcription
 		}
 
 		if updateFields["document_type"] {
@@ -211,17 +247,30 @@ func main() {
 			update.Created = &merged.DocumentDate
 		}
 
-		if updateFields["correspondents"] && len(merged.Correspondents) > 0 {
-			// Ensure all correspondents exist, assign the first one to the document
-			for _, name := range merged.Correspondents {
-				if _, err := pClient.EnsureCorrespondent(ctx, name, corrIDByName); err != nil {
-					log.Printf("  WARNING: failed to ensure correspondent '%s': %v", name, err)
-				}
-			}
-			if corrID, ok := corrIDByName[merged.Correspondents[0]]; ok {
+		if updateFields["correspondent"] && merged.Correspondent != "" {
+			corrID, err := pClient.EnsureCorrespondent(ctx, merged.Correspondent, corrIDByName)
+			if err != nil {
+				log.Printf("  WARNING: failed to ensure correspondent '%s': %v", merged.Correspondent, err)
+			} else {
 				update.Correspondent = &corrID
+				log.Printf("  Correspondent: %s", merged.Correspondent)
 			}
-			log.Printf("  Correspondents: %v (assigned: %s)", merged.Correspondents, merged.Correspondents[0])
+		}
+
+		if updateFields["tags"] && len(merged.Tags) > 0 {
+			var tagIDs []int
+			for _, name := range merged.Tags {
+				tagID, err := pClient.EnsureTag(ctx, name, tagIDByName)
+				if err != nil {
+					log.Printf("  WARNING: failed to ensure tag '%s': %v", name, err)
+					continue
+				}
+				tagIDs = append(tagIDs, tagID)
+			}
+			if len(tagIDs) > 0 {
+				update.Tags = tagIDs
+				log.Printf("  Tags: %v", merged.Tags)
+			}
 		}
 
 		if err := pClient.UpdateDocument(ctx, doc.ID, update); err != nil {
