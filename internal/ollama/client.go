@@ -50,9 +50,10 @@ type DocumentAnalysis struct {
 }
 
 type chatResponse struct {
-	Message chatResponseMessage `json:"message"`
-	Done    bool                `json:"done"`
-	Error   string              `json:"error,omitempty"`
+	Message    chatResponseMessage `json:"message"`
+	Done       bool                `json:"done"`
+	DoneReason string              `json:"done_reason,omitempty"`
+	Error      string              `json:"error,omitempty"`
 }
 
 type chatResponseMessage struct {
@@ -149,7 +150,7 @@ func buildPrompt(documentTypes []string) string {
 	typeList := strings.Join(documentTypes, ", ")
 	return fmt.Sprintf(`You are looking at a single page of a document. Analyze this page image and provide:
 1. A concise summary of this page's content: what it is, relevant dates, people, transactions, entities, accounts, and any other key details.
-2. A full transcription of all visible text on this page, preserving the original wording and layout as much as possible.
+2. A full transcription of all visible text on this page. Preserve the meaningful content and general structure, but normalize whitespace - use single spaces between words and single newlines between lines or sections. Do NOT repeat tabs, newlines, or spaces excessively. For barcodes, tracking numbers, or long sequences of repeated characters, just note their presence (e.g. "[barcode]") rather than transcribing every digit.
 3. A suggested file name (descriptive, using underscores, with no extension).
 4. The document type, which must be one of: %s.
 5. The document date in YYYY-MM-DD format. Only provide a date if you are confident it is the primary date of the document (e.g. invoice date, letter date, transaction date). Use an empty string if uncertain.
@@ -170,7 +171,12 @@ func (c *Client) AnalyzeStructured(imageBase64 string, documentTypes []string) (
 		Stream:  false,
 		Think:   false,
 		Format:  buildSchema(documentTypes),
-		Options: &modelOptions{Temperature: 0},
+		Options: &modelOptions{
+			Temperature:   0,
+			NumCtx:        65536, // Use more of the 128k context
+			NumPredict:    16384, // Allow very long transcriptions
+			RepeatPenalty: 1.5,   // Discourage repetitive patterns (whitespace, barcodes, zeros)
+		},
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -178,7 +184,8 @@ func (c *Client) AnalyzeStructured(imageBase64 string, documentTypes []string) (
 		return nil, fmt.Errorf("marshaling request: %w", err)
 	}
 
-	log.Printf("  Sending request to Ollama (model=%s)...", c.Model)
+	log.Printf("  Sending request to Ollama (model=%s, num_ctx=%d, num_predict=%d)...",
+		c.Model, reqBody.Options.NumCtx, reqBody.Options.NumPredict)
 
 	resp, err := c.HTTP.Post(c.BaseURL+"/api/chat", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -205,13 +212,17 @@ func (c *Client) AnalyzeStructured(imageBase64 string, documentTypes []string) (
 	}
 
 	content := result.Message.Content
-	log.Printf("  Ollama response: done=%v, content_len=%d", result.Done, len(content))
+	log.Printf("  Ollama response: done=%v, done_reason=%q, content_len=%d", result.Done, result.DoneReason, len(content))
+
+	if !result.Done {
+		log.Printf("  WARNING: Ollama returned incomplete response (done=false, reason=%q)", result.DoneReason)
+	}
 
 	if content == "" {
 		return nil, fmt.Errorf("ollama returned empty response: full_body=%s", string(respBody))
 	}
 
-	log.Printf("  Response (last_100=%s)", truncateTail(content, 100))
+	log.Printf("  Response (first_200=%s ... last_100=%s)", truncateHead(content, 200), truncateTail(content, 100))
 
 	var analysis DocumentAnalysis
 	if err := json.Unmarshal([]byte(content), &analysis); err != nil {
@@ -226,4 +237,11 @@ func truncateTail(s string, n int) string {
 		return s
 	}
 	return "..." + s[len(s)-n:]
+}
+
+func truncateHead(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
